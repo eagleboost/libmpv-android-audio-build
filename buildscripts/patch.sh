@@ -12,7 +12,7 @@ for dep_path in "${PATCHES[@]}"; do
         git reset --hard
         for patch in "${patches[@]}"; do
             echo Applying $patch
-            git apply "$ROOT/$patch"
+            git apply --verbose "$ROOT/$patch" || git apply --3way "$ROOT/$patch" || { echo "FAILED: $patch"; exit 1; }
         done
         cd $ROOT
     fi
