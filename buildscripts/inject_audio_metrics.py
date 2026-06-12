@@ -78,7 +78,7 @@ typedef struct {
     double mid;
     double treble;
     double volume;
-    bool beat;
+    int beat;
     uint64_t frame_count;
 } mpv_audio_metrics_t;
 
