@@ -42,15 +42,8 @@ if 'audio_metrics' not in content:
         '#include <stdio.h>\n#include "audio/audio_metrics.h"'
     )
 
-    hook = """    if (data && data[0] && num_samples > 0 && !af_fmt_is_planar(ao->format)) {
-        int fmt = af_fmt_from_planar(ao->format);
-        if (fmt == AF_FORMAT_FLOAT) {
-            audio_metrics_feed_float((const float *)data[0],
-                                     num_samples, ao->channels.num);
-        } else if (fmt == AF_FORMAT_S16) {
-            audio_metrics_feed_s16((const int16_t *)data[0],
-                                   num_samples, ao->channels.num);
-        }
+    hook = """    if (data && data[0] && num_samples > 0) {
+        audio_metrics_feed(data[0], num_samples, ao->channels.num, af_fmt_from_planar(ao->format));
     }
 """
 
@@ -80,8 +73,17 @@ if 'audio_metrics_init' not in content:
         'MPV_EXPORT void mpv_wakeup(mpv_handle *ctx);',
         """MPV_EXPORT void mpv_wakeup(mpv_handle *ctx);
 
+typedef struct {
+    double bass;
+    double mid;
+    double treble;
+    double volume;
+    bool beat;
+    uint64_t frame_count;
+} mpv_audio_metrics_t;
+
 MPV_EXPORT void audio_metrics_init(int fft_size, int sample_rate);
-MPV_EXPORT const audio_metrics_t *audio_metrics_get(void);
+MPV_EXPORT const mpv_audio_metrics_t *audio_metrics_get(void);
 MPV_EXPORT void audio_metrics_reset(void);
 MPV_EXPORT void audio_metrics_destroy(void);
 """
