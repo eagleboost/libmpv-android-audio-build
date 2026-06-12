@@ -1,0 +1,287 @@
+--- /dev/null
++++ b/audio/audio_metrics.h
+@@ -0,0 +1,22 @@
++#ifndef AUDIO_METRICS_H
++#define AUDIO_METRICS_H
++
++#include <stdint.h>
++#include <stdbool.h>
++
++typedef struct {
++    double bass;
++    double mid;
++    double treble;
++    double volume;
++    bool beat;
++    uint64_t frame_count;
++} audio_metrics_t;
++
++void audio_metrics_init(int fft_size, int sample_rate);
++void audio_metrics_feed_float(const float *samples, int frame_count, int channels);
++void audio_metrics_feed_s16(const int16_t *samples, int frame_count, int channels);
++const audio_metrics_t *audio_metrics_get(void);
++void audio_metrics_reset(void);
++void audio_metrics_destroy(void);
++
++#endif
+--- /dev/null
++++ b/audio/audio_metrics.c
+@@ -0,0 +1,188 @@
++#include "audio_metrics.h"
++#include <stdlib.h>
++#include <string.h>
++#include <math.h>
++
++#ifndef M_PI
++#define M_PI 3.14159265358979323846
++#endif
++
++static audio_metrics_t g_metrics = {0};
++static float *g_fft_re = NULL;
++static float *g_fft_im = NULL;
++static float *g_window = NULL;
++static float *g_ring = NULL;
++static int g_fft_size = 0;
++static int g_sample_rate = 0;
++static int g_ring_pos = 0;
++static int g_ring_filled = 0;
++static bool g_initialized = false;
++
++#define BEAT_HISTORY 43
++static double g_beat_history[BEAT_HISTORY];
++static int g_beat_pos = 0;
++static int g_beat_count = 0;
++
++static void fft(float *re, float *im, int n) {
++    for (int i = 1, j = 0; i < n; i++) {
++        int bit = n >> 1;
++        while (j & bit) { j ^= bit; bit >>= 1; }
++        j ^= bit;
++        if (i < j) {
++            float tr = re[i]; re[i] = re[j]; re[j] = tr;
++            float ti = im[i]; im[i] = im[j]; im[j] = ti;
++        }
++    }
++    for (int len = 2; len <= n; len <<= 1) {
++        double ang = 2.0 * M_PI / len;
++        float wRe = (float)cos(ang);
++        float wIm = (float)-sin(ang);
++        for (int i = 0; i < n; i += len) {
++            float curRe = 1.0f, curIm = 0.0f;
++            for (int j = 0; j < len / 2; j++) {
++                float tRe = curRe * re[i+j+len/2] - curIm * im[i+j+len/2];
++                float tIm = curRe * im[i+j+len/2] + curIm * re[i+j+len/2];
++                re[i+j+len/2] = re[i+j] - tRe;
++                im[i+j+len/2] = im[i+j] - tIm;
++                re[i+j] += tRe;
++                im[i+j] += tIm;
++                float newRe = curRe * wRe - curIm * wIm;
++                curIm = curRe * wIm + curIm * wRe;
++                curRe = newRe;
++            }
++        }
++    }
++}
++
++static void compute_metrics(void) {
++    if (!g_initialized) return;
++    int n = g_fft_size;
++    int capacity = n * 2;
++
++    for (int i = 0; i < n; i++) {
++        int idx = (g_ring_pos - n + i + capacity) % capacity;
++        float s = g_ring[idx] * g_window[i];
++        g_fft_re[i] = s;
++        g_fft_im[i] = 0.0f;
++    }
++
++    fft(g_fft_re, g_fft_im, n);
++
++    double sum = 0;
++    for (int i = 0; i < n; i++)
++        sum += g_fft_re[i] * g_fft_re[i] + g_fft_im[i] * g_fft_im[i];
++    g_metrics.volume = sqrt(sum / ((double)n * n));
++
++    int halfN = n / 2;
++    int bassEnd = (int)(halfN * 0.07);
++    int midEnd = (int)(halfN * 0.4);
++    if (bassEnd < 1) bassEnd = 1;
++    if (midEnd <= bassEnd) midEnd = bassEnd + 1;
++
++    double bassSum = 0, midSum = 0, trebSum = 0;
++    for (int i = 1; i <= bassEnd && i < halfN; i++) {
++        double mag = sqrt((double)(g_fft_re[i]*g_fft_re[i] + g_fft_im[i]*g_fft_im[i]));
++        bassSum += mag;
++    }
++    for (int i = bassEnd + 1; i <= midEnd && i < halfN; i++) {
++        double mag = sqrt((double)(g_fft_re[i]*g_fft_re[i] + g_fft_im[i]*g_fft_im[i]));
++        midSum += mag;
++    }
++    for (int i = midEnd + 1; i < halfN; i++) {
++        double mag = sqrt((double)(g_fft_re[i]*g_fft_re[i] + g_fft_im[i]*g_fft_im[i]));
++        trebSum += mag;
++    }
++
++    g_metrics.bass = bassEnd > 0 ? (bassSum / bassEnd) / n : 0;
++    g_metrics.mid = (midEnd > bassEnd) ? (midSum / (midEnd - bassEnd)) / n : 0;
++    g_metrics.treble = (halfN > midEnd + 1) ? (trebSum / (halfN - midEnd - 1)) / n : 0;
++
++    double bassVal = g_metrics.bass;
++    g_beat_history[g_beat_pos] = bassVal;
++    g_beat_pos = (g_beat_pos + 1) % BEAT_HISTORY;
++    if (g_beat_count < BEAT_HISTORY) g_beat_count++;
++
++    double avg = 0;
++    for (int i = 0; i < g_beat_count; i++) avg += g_beat_history[i];
++    avg /= g_beat_count;
++
++    g_metrics.beat = (g_beat_count >= 4) && (bassVal > avg * 1.4) && (bassVal > 0.05);
++}
++
++void audio_metrics_init(int fft_size, int sample_rate) {
++    audio_metrics_destroy();
++    g_fft_size = fft_size;
++    g_sample_rate = sample_rate;
++    g_ring_pos = 0;
++    g_ring_filled = 0;
++    g_beat_pos = 0;
++    g_beat_count = 0;
++    memset(g_beat_history, 0, sizeof(g_beat_history));
++    memset(&g_metrics, 0, sizeof(g_metrics));
++    g_fft_re = (float *)calloc(fft_size, sizeof(float));
++    g_fft_im = (float *)calloc(fft_size, sizeof(float));
++    g_window = (float *)calloc(fft_size, sizeof(float));
++    g_ring = (float *)calloc(fft_size * 2, sizeof(float));
++    for (int i = 0; i < fft_size; i++)
++        g_window[i] = (float)(0.5 * (1.0 - cos(2.0 * M_PI * i / (fft_size - 1))));
++    g_initialized = (g_fft_re && g_fft_im && g_window && g_ring);
++}
++
++static void feed_mono(float mono) {
++    if (!g_initialized) return;
++    int capacity = g_fft_size * 2;
++    g_ring[g_ring_pos] = mono;
++    g_ring_pos = (g_ring_pos + 1) % capacity;
++    if (g_ring_filled < capacity) g_ring_filled++;
++}
++
++void audio_metrics_feed_float(const float *samples, int frame_count, int channels) {
++    for (int f = 0; f < frame_count; f++) {
++        float mono = 0;
++        for (int c = 0; c < channels; c++) mono += samples[f * channels + c];
++        mono /= channels;
++        feed_mono(mono);
++    }
++    g_metrics.frame_count += frame_count;
++    if (g_ring_filled >= g_fft_size) compute_metrics();
++}
++
++void audio_metrics_feed_s16(const int16_t *samples, int frame_count, int channels) {
++    for (int f = 0; f < frame_count; f++) {
++        float mono = 0;
++        for (int c = 0; c < channels; c++) mono += samples[f * channels + c];
++        mono = (mono / channels) / 32768.0f;
++        feed_mono(mono);
++    }
++    g_metrics.frame_count += frame_count;
++    if (g_ring_filled >= g_fft_size) compute_metrics();
++}
++
++const audio_metrics_t *audio_metrics_get(void) { return &g_metrics; }
++
++void audio_metrics_reset(void) {
++    g_ring_pos = 0; g_ring_filled = 0; g_beat_pos = 0; g_beat_count = 0;
++    g_metrics.frame_count = 0; g_metrics.beat = false;
++    memset(g_beat_history, 0, sizeof(g_beat_history));
++}
++
++void audio_metrics_destroy(void) {
++    free(g_fft_re); g_fft_re = NULL;
++    free(g_fft_im); g_fft_im = NULL;
++    free(g_window); g_window = NULL;
++    free(g_ring); g_ring = NULL;
++    g_fft_size = 0; g_initialized = false;
++    memset(&g_metrics, 0, sizeof(g_metrics));
++}
+--- a/audio/out/ao.c
++++ b/audio/out/ao.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include <stdio.h>
++#include "audio/audio_metrics.h"
+ #include <stdlib.h>
+ #include <string.h>
+ #include <math.h>
+@@ -593,6 +594,25 @@
+ void ao_post_process_data(struct ao *ao, void **data, int num_samples)
+ {
++    // Feed audio data to metrics analyzer.
++    // Only process interleaved float or s16 (most common formats).
++    if (data && data[0] && num_samples > 0 && !af_fmt_is_planar(ao->format)) {
++        int fmt = af_fmt_from_planar(ao->format);
++        if (fmt == AF_FORMAT_FLOAT) {
++            audio_metrics_feed_float((const float *)data[0],
++                                     num_samples, ao->channels.num);
++        } else if (fmt == AF_FORMAT_S16) {
++            audio_metrics_feed_s16((const int16_t *)data[0],
++                                   num_samples, ao->channels.num);
++        } else if (fmt == AF_FORMAT_S32) {
++            // S32 can be treated as float by normalizing
++            float *d = (float *)data[0];
++            (void)d; // S32 needs conversion, skip for now
++        }
++    }
++
+     bool planar = af_fmt_is_planar(ao->format);
+     int planes = planar ? ao->channels.num : 1;
+     int plane_samples = num_samples * (planar ? 1: ao->channels.num);
+--- a/libmpv/client.h
++++ b/libmpv/client.h
+@@ -1710,6 +1710,30 @@
+  */
+ MPV_EXPORT void mpv_wakeup(mpv_handle *ctx);
+ 
++/**
++ * Initialize the audio metrics analyzer.
++ */
++MPV_EXPORT void audio_metrics_init(int fft_size, int sample_rate);
++
++/**
++ * Get current audio metrics (bass, mid, treble, volume, beat).
++ * Returns a pointer to a static struct. Do NOT free.
++ */
++MPV_EXPORT const audio_metrics_t *audio_metrics_get(void);
++
++/**
++ * Reset metrics state (e.g. on track change).
++ */
++MPV_EXPORT void audio_metrics_reset(void);
++
++/**
++ * Release all resources.
++ */
++MPV_EXPORT void audio_metrics_destroy(void);
++
+ /**
+  * Set a custom function that should be called when there are new events. Use
+--- a/libmpv/mpv.def
++++ b/libmpv/mpv.def
+@@ -52,3 +52,7 @@
+ mpv_wait_async_requests
+ mpv_wait_event
+ mpv_wakeup
++audio_metrics_init
++audio_metrics_get
++audio_metrics_reset
++audio_metrics_destroy
+--- a/wscript_build.py
++++ b/wscript_build.py
+@@ -114,6 +114,7 @@
+         ( "audio/filter/af_scaletempo2_internals.c" ),
+         ( "audio/fmt-conversion.c" ),
+         ( "audio/format.c" ),
++        ( "audio/audio_metrics.c" ),
+         ( "audio/out/ao.c" ),
+         ( "audio/out/ao_alsa.c",                 "alsa" ),
+         ( "audio/out/ao_audiotrack.c",           "android" ),
