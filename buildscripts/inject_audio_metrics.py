@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import os, sys
 
-MPV_DIR = os.path.join(os.path.dirname(__file__), '..', 'deps', 'mpv')
+MPV_DIR = os.path.join(os.getcwd(), 'deps', 'mpv')
 MPV_DIR = os.path.abspath(MPV_DIR)
 
 if not os.path.isdir(MPV_DIR):
