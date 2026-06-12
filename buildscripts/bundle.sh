@@ -1,5 +1,8 @@
 # --------------------------------------------------
 
+#!/bin/bash
+set -e
+
 if [ ! -f "deps" ]; then
   sudo rm -r deps
 fi

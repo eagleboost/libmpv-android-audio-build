@@ -52,13 +52,19 @@ if 'audio_metrics' not in content:
                                    num_samples, ao->channels.num);
         }
     }
-
 """
 
-    content = content.replace(
-        'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{',
-        'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{\n' + hook
-    )
+    old = 'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{\n'
+    new = 'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{\n' + hook
+    if old in content:
+        content = content.replace(old, new, 1)
+    else:
+        old2 = 'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{'
+        new2 = 'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{\n' + hook
+        if old2 in content:
+            content = content.replace(old2, new2, 1)
+        else:
+            print("[audio_metrics] WARNING: Could not find ao_post_process_data in ao.c")
 
     with open(ao, 'w') as fh:
         fh.write(content)
