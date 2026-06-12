@@ -1,12 +1,10 @@
-# --------------------------------------------------
-
 #!/bin/bash
 set -e
 
-if [ ! -f "deps" ]; then
+if [ -d "deps" ]; then
   sudo rm -r deps
 fi
-if [ ! -f "prefix" ]; then
+if [ -d "prefix" ]; then
   sudo rm -r prefix
 fi
 
