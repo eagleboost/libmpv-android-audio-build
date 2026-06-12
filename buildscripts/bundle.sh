@@ -9,6 +9,53 @@ fi
 
 ./download.sh
 ./patch.sh
+
+# --- Inject audio_metrics into mpv source ---
+MPV_DIR="deps/mpv"
+if [ -d "$MPV_DIR" ]; then
+  echo "[audio_metrics] Injecting into mpv source..."
+  cp audio_metrics/audio_metrics.h "$MPV_DIR/audio/audio_metrics.h"
+  cp audio_metrics/audio_metrics.c "$MPV_DIR/audio/audio_metrics.c"
+
+  # Add audio_metrics.c to wscript_build.py sources
+  sed -i '/"( "audio\/format.c" )"/a\        ( "audio/audio_metrics.c" ),' "$MPV_DIR/wscript_build.py"
+
+  # Add include to ao.c
+  sed -i 's/#include <stdio.h>/#include <stdio.h>\n#include "audio\/audio_metrics.h"/' "$MPV_DIR/audio/out/ao.c"
+
+  # Add feed call at the start of ao_post_process_data
+  sed -i '/^void ao_post_process_data(struct ao \*ao, void \*\*data, int num_samples)$/,/^{/{
+    /^{/a\
+    if (data \\&\\& data[0] \\&\\& num_samples > 0 \\&\\& !af_fmt_is_planar(ao->format)) {\
+        int fmt = af_fmt_from_planar(ao->format);\
+        if (fmt == AF_FORMAT_FLOAT) {\
+            audio_metrics_feed_float((const float *)data[0], num_samples, ao->channels.num);\
+        } else if (fmt == AF_FORMAT_S16) {\
+            audio_metrics_feed_s16((const int16_t *)data[0], num_samples, ao->channels.num);\
+        }\
+    }
+  }' "$MPV_DIR/audio/out/ao.c"
+
+  # Add declarations to client.h
+  sed -i '/MPV_EXPORT void mpv_wakeup(mpv_handle \*ctx);/a\
+\
+MPV_EXPORT void audio_metrics_init(int fft_size, int sample_rate);\
+MPV_EXPORT const audio_metrics_t *audio_metrics_get(void);\
+MPV_EXPORT void audio_metrics_reset(void);\
+MPV_EXPORT void audio_metrics_destroy(void);' "$MPV_DIR/libmpv/client.h"
+
+  # Add to mpv.def
+  echo "audio_metrics_init" >> "$MPV_DIR/libmpv/mpv.def"
+  echo "audio_metrics_get" >> "$MPV_DIR/libmpv/mpv.def"
+  echo "audio_metrics_reset" >> "$MPV_DIR/libmpv/mpv.def"
+  echo "audio_metrics_destroy" >> "$MPV_DIR/libmpv/mpv.def"
+
+  echo "[audio_metrics] Injection complete."
+else
+  echo "[audio_metrics] WARNING: mpv source dir not found, skipping."
+fi
+# --- End inject ---
+
 ./build.sh
 
 zip -r debug-symbols-default.zip prefix/*/lib
