@@ -7,12 +7,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define AF_FORMAT_FLOAT  0x100
-#define AF_FORMAT_S16    0x200
-#define AF_FORMAT_S32    0x300
-#define AF_FORMAT_U8     0x400
-#define AF_FORMAT_DOUBLE 0x500
-
 static mpv_audio_metrics_t g_metrics = {0};
 static float *g_fft_re = NULL;
 static float *g_fft_im = NULL;
@@ -135,27 +129,39 @@ static void feed_mono(float mono) {
     if (g_ring_filled < capacity) g_ring_filled++;
 }
 
-void audio_metrics_feed(const void *samples, int frame_count, int channels, int af_format) {
+void audio_metrics_feed(const void *samples, int frame_count, int channels, int bytes_per_sample) {
     if (!g_initialized) return;
     for (int f = 0; f < frame_count; f++) {
         float mono = 0;
-        switch (af_format) {
-        case AF_FORMAT_FLOAT: {
+        switch (bytes_per_sample) {
+        case 4: {
             const float *p = (const float *)samples;
             for (int c = 0; c < channels; c++) mono += p[f * channels + c];
             mono /= channels;
             break;
         }
-        case AF_FORMAT_S16: {
+        case 2: {
             const int16_t *p = (const int16_t *)samples;
             for (int c = 0; c < channels; c++) mono += p[f * channels + c];
             mono = (mono / channels) / 32768.0f;
             break;
         }
-        case AF_FORMAT_S32: {
-            const int32_t *p = (const int32_t *)samples;
-            for (int c = 0; c < channels; c++) mono += p[f * channels + c];
-            mono = (mono / channels) / 2147483648.0f;
+        case 3: {
+            const uint8_t *p = (const uint8_t *)samples;
+            for (int c = 0; c < channels; c++) {
+                int32_t val = (int32_t)(p[(f * channels + c) * 3] |
+                    (p[(f * channels + c) * 3 + 1] << 8) |
+                    (p[(f * channels + c) * 3 + 2] << 16));
+                if (val & 0x800000) val |= 0xFF000000;
+                mono += (float)val / 8388608.0f;
+            }
+            mono /= channels;
+            break;
+        }
+        case 1: {
+            const uint8_t *p = (const uint8_t *)samples;
+            for (int c = 0; c < channels; c++) mono += (float)(p[f * channels + c] - 128);
+            mono = (mono / channels) / 128.0f;
             break;
         }
         default:

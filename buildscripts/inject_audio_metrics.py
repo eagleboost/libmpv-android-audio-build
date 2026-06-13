@@ -32,6 +32,8 @@ if 'audio_metrics' not in content:
     print("[audio_metrics] Added to wscript_build.py")
 
 # 3. Patch ao.c
+import re
+
 ao = os.path.join(MPV_DIR, 'audio', 'out', 'ao.c')
 with open(ao, 'r') as fh:
     content = fh.read()
@@ -43,25 +45,21 @@ if 'audio_metrics' not in content:
     )
 
     hook = """    if (data && data[0] && num_samples > 0) {
-        audio_metrics_feed(data[0], num_samples, ao->channels.num, af_fmt_from_planar(ao->format));
+        audio_metrics_feed(data[0], num_samples, ao->channels.num, af_fmt_to_bytes(af_fmt_from_planar(ao->format)));
     }
 """
 
-    old = 'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{\n'
-    new = 'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{\n' + hook
-    if old in content:
-        content = content.replace(old, new, 1)
+    pattern = r'(void ao_post_process_data\(struct ao \*ao, void \*\*data, int num_samples\)\s*\{)'
+    match = re.search(pattern, content)
+    if match:
+        pos = match.end()
+        content = content[:pos] + '\n' + hook + content[pos:]
+        print("[audio_metrics] Patched audio/out/ao.c")
     else:
-        old2 = 'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{'
-        new2 = 'void ao_post_process_data(struct ao *ao, void **data, int num_samples)\n{\n' + hook
-        if old2 in content:
-            content = content.replace(old2, new2, 1)
-        else:
-            print("[audio_metrics] WARNING: Could not find ao_post_process_data in ao.c")
+        print("[audio_metrics] WARNING: Could not find ao_post_process_data in ao.c")
 
     with open(ao, 'w') as fh:
         fh.write(content)
-    print("[audio_metrics] Patched audio/out/ao.c")
 
 # 4. Patch client.h
 client_h = os.path.join(MPV_DIR, 'libmpv', 'client.h')

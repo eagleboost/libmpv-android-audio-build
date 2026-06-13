@@ -14,7 +14,7 @@ typedef struct {
 } mpv_audio_metrics_t;
 
 void audio_metrics_init(int fft_size, int sample_rate);
-void audio_metrics_feed(const void *samples, int frame_count, int channels, int af_format);
+void audio_metrics_feed(const void *samples, int frame_count, int channels, int bytes_per_sample);
 const mpv_audio_metrics_t *audio_metrics_get(void);
 void audio_metrics_reset(void);
 void audio_metrics_destroy(void);
