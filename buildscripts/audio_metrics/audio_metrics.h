@@ -4,12 +4,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define AUDIO_METRICS_SPECTRUM_BINS 256
+
 typedef struct {
     double bass;
     double mid;
     double treble;
     double volume;
     int beat;
+    float spectrum[AUDIO_METRICS_SPECTRUM_BINS];
     uint64_t frame_count;
 } mpv_audio_metrics_t;
 

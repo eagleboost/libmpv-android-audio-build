@@ -92,6 +92,23 @@ static void compute_metrics(void) {
     g_metrics.mid = midEnd > bassEnd ? (midSum / (midEnd - bassEnd)) / n : 0;
     g_metrics.treble = halfN > midEnd+1 ? (trebSum / (halfN - midEnd - 1)) / n : 0;
 
+    /* Downsample halfN magnitude bins into AUDIO_METRICS_SPECTRUM_BINS linear
+       buckets. Each bucket = average magnitude of its source bins, normalized
+       by n (same scale as bass/mid/treble). */
+    for (int i = 0; i < AUDIO_METRICS_SPECTRUM_BINS; i++) {
+        int lo = (int)((long)halfN * i / AUDIO_METRICS_SPECTRUM_BINS);
+        int hi = (int)((long)halfN * (i + 1) / AUDIO_METRICS_SPECTRUM_BINS);
+        if (hi <= lo) hi = lo + 1;
+        if (hi > halfN) hi = halfN;
+        double mag = 0.0;
+        int cnt = 0;
+        for (int k = lo; k < hi; k++) {
+            mag += sqrt((double)(g_fft_re[k] * g_fft_re[k] + g_fft_im[k] * g_fft_im[k]));
+            cnt++;
+        }
+        g_metrics.spectrum[i] = cnt > 0 ? (float)(mag / cnt) / n : 0.0f;
+    }
+
     double bassVal = g_metrics.bass;
     g_beat_history[g_beat_pos] = bassVal;
     g_beat_pos = (g_beat_pos + 1) % BEAT_HISTORY;
@@ -183,6 +200,7 @@ void audio_metrics_reset(void) {
     g_metrics.frame_count = 0;
     g_metrics.beat = false;
     memset(g_beat_history, 0, sizeof(g_beat_history));
+    memset(g_metrics.spectrum, 0, sizeof(g_metrics.spectrum));
 }
 
 void audio_metrics_destroy(void) {
