@@ -17,6 +17,15 @@ static int g_ring_pos = 0;
 static int g_ring_filled = 0;
 static bool g_initialized = false;
 
+/* PCM tap 环形缓冲：约 4 秒 @ 48k，单声道 float = 768 KB。
+ * 单生产者（mpv 音频线程）单消费者（Dart 轮询）。与 g_metrics 一样不加锁，
+ * 偶发竞争最多多读/少读几个样本，对 ASR 无害。 */
+#define PCM_TAP_CAP 192000
+static float *g_tap = NULL;
+static int g_tap_w = 0;     /* 写入位置 */
+static int g_tap_count = 0; /* 当前可读样本数 */
+static int g_tap_sr = 0;    /* 源采样率 */
+
 #define BEAT_HISTORY 43
 static double g_beat_history[BEAT_HISTORY];
 static int g_beat_pos = 0;
@@ -136,6 +145,11 @@ void audio_metrics_init(int fft_size, int sample_rate) {
     for (int i = 0; i < fft_size; i++)
         g_window[i] = (float)(0.5 * (1.0 - cos(2.0 * M_PI * i / (fft_size - 1))));
     g_initialized = (g_fft_re && g_fft_im && g_window && g_ring);
+
+    g_tap = (float *)calloc(PCM_TAP_CAP, sizeof(float));
+    g_tap_w = 0;
+    g_tap_count = 0;
+    g_tap_sr = sample_rate;
 }
 
 static void feed_mono(float mono) {
@@ -146,8 +160,17 @@ static void feed_mono(float mono) {
     if (g_ring_filled < capacity) g_ring_filled++;
 }
 
-void audio_metrics_feed(const void *samples, int frame_count, int channels, int bytes_per_sample) {
+static void tap_write(float mono) {
+    if (!g_tap) return;
+    g_tap[g_tap_w] = mono;
+    g_tap_w = (g_tap_w + 1) % PCM_TAP_CAP;
+    /* 满了则隐式覆盖最旧样本（count 维持上限，读起点随 g_tap_w 前移）。 */
+    if (g_tap_count < PCM_TAP_CAP) g_tap_count++;
+}
+
+void audio_metrics_feed(const void *samples, int frame_count, int channels, int bytes_per_sample, int sample_rate) {
     if (!g_initialized) return;
+    g_tap_sr = sample_rate;
     for (int f = 0; f < frame_count; f++) {
         float mono = 0;
         switch (bytes_per_sample) {
@@ -185,6 +208,7 @@ void audio_metrics_feed(const void *samples, int frame_count, int channels, int 
             return;
         }
         feed_mono(mono);
+        tap_write(mono);
     }
     g_metrics.frame_count += frame_count;
     if (g_ring_filled >= g_fft_size) compute_metrics();
@@ -201,6 +225,8 @@ void audio_metrics_reset(void) {
     g_metrics.beat = false;
     memset(g_beat_history, 0, sizeof(g_beat_history));
     memset(g_metrics.spectrum, 0, sizeof(g_metrics.spectrum));
+    g_tap_w = 0;
+    g_tap_count = 0;
 }
 
 void audio_metrics_destroy(void) {
@@ -208,7 +234,32 @@ void audio_metrics_destroy(void) {
     free(g_fft_im); g_fft_im = NULL;
     free(g_window); g_window = NULL;
     free(g_ring); g_ring = NULL;
+    free(g_tap); g_tap = NULL;
+    g_tap_w = 0;
+    g_tap_count = 0;
+    g_tap_sr = 0;
     g_fft_size = 0;
     g_initialized = false;
     memset(&g_metrics, 0, sizeof(g_metrics));
+}
+
+int audio_pcm_tap_read(float *out, int max_samples) {
+    if (!g_tap || !out || max_samples <= 0) return 0;
+    int count = g_tap_count;            /* 快照，降低与生产者的竞争窗口 */
+    int n = count < max_samples ? count : max_samples;
+    int start = (g_tap_w - count + PCM_TAP_CAP) % PCM_TAP_CAP;
+    for (int i = 0; i < n; i++) {
+        out[i] = g_tap[(start + i) % PCM_TAP_CAP];
+    }
+    g_tap_count -= n;                   /* 消费已读样本 */
+    return n;
+}
+
+int audio_pcm_tap_samplerate(void) {
+    return g_tap_sr;
+}
+
+void audio_pcm_tap_reset(void) {
+    g_tap_w = 0;
+    g_tap_count = 0;
 }

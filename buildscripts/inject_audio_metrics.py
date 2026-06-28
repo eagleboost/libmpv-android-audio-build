@@ -45,7 +45,7 @@ if 'audio_metrics' not in content:
     )
 
     hook = """    if (data && data[0] && num_samples > 0) {
-        audio_metrics_feed(data[0], num_samples, ao->channels.num, af_fmt_to_bytes(af_fmt_from_planar(ao->format)));
+        audio_metrics_feed(data[0], num_samples, ao->channels.num, af_fmt_to_bytes(af_fmt_from_planar(ao->format)), ao->samplerate);
     }
 """
 
@@ -84,6 +84,10 @@ MPV_EXPORT void audio_metrics_init(int fft_size, int sample_rate);
 MPV_EXPORT const mpv_audio_metrics_t *audio_metrics_get(void);
 MPV_EXPORT void audio_metrics_reset(void);
 MPV_EXPORT void audio_metrics_destroy(void);
+
+MPV_EXPORT int audio_pcm_tap_read(float *out, int max_samples);
+MPV_EXPORT int audio_pcm_tap_samplerate(void);
+MPV_EXPORT void audio_pcm_tap_reset(void);
 """
     )
     with open(client_h, 'w') as fh:
@@ -95,7 +99,7 @@ mpv_def = os.path.join(MPV_DIR, 'libmpv', 'mpv.def')
 with open(mpv_def, 'r') as fh:
     content = fh.read()
 if 'audio_metrics_init' not in content:
-    content += "audio_metrics_init\naudio_metrics_get\naudio_metrics_reset\naudio_metrics_destroy\n"
+    content += "audio_metrics_init\naudio_metrics_get\naudio_metrics_reset\naudio_metrics_destroy\naudio_pcm_tap_read\naudio_pcm_tap_samplerate\naudio_pcm_tap_reset\n"
     with open(mpv_def, 'w') as fh:
         fh.write(content)
     print("[audio_metrics] Patched libmpv/mpv.def")
