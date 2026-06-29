@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
@@ -40,11 +42,9 @@ jobs:
             ./buildscripts/deps/media-kit-android-helper/app/build/outputs/apk/release/*.jar
       - name: Upload Release
         uses: softprops/action-gh-release@v1
-        if: github.ref == 'refs/heads/main'
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          draft: true
+          draft: false
           prerelease: false
-          tag_name: "vnext"
           files: |
-            buildscripts/*.zip
-            buildscripts/deps/media-kit-android-helper/app/build/outputs/apk/release/*.jar
+            buildscripts/deps/media-kit-android-helper/app/build/outputs/apk/release/default-*.jar
