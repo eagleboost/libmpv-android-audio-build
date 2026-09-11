@@ -26,6 +26,7 @@
 typedef void *dfrestore_t;
 typedef dfrestore_t (*dfrestore_init_fn)(int channels, float atten_lim_db, float pf_beta);
 typedef int (*dfrestore_process_fn)(dfrestore_t, float *samples, int frames);
+typedef size_t (*dfrestore_hop_fn)(dfrestore_t);
 typedef void (*dfrestore_reset_fn)(dfrestore_t);
 typedef void (*dfrestore_free_fn)(dfrestore_t);
 
@@ -46,6 +47,7 @@ struct priv {
     dfrestore_t df;
     dfrestore_init_fn df_init;
     dfrestore_process_fn df_process;
+    dfrestore_hop_fn df_hop_size;
     dfrestore_reset_fn df_reset;
     dfrestore_free_fn df_free;
 };
@@ -60,25 +62,34 @@ static void unload(struct priv *s)
     s->lib = NULL;
     s->df_init = NULL;
     s->df_process = NULL;
+    s->df_hop_size = NULL;
     s->df_reset = NULL;
     s->df_free = NULL;
 }
 
-static bool load_lib(struct priv *s)
+static bool load_lib(struct priv *s, struct mp_filter *f)
 {
+    MP_INFO(f, "[dfrestore] dlopen(libdfrestore.so)...\n"); // 见下方说明
     s->lib = dlopen("libdfrestore.so", RTLD_NOW | RTLD_LOCAL);
     if (!s->lib) {
+        MP_ERR(f, "[dfrestore] dlopen failed: %s\n", dlerror());
         // Android 上同 APK 的 native lib 目录取决于调用进程 classloader
         // namespace，通常可直接按名加载；失败则再试全路径变体。
         s->lib = dlopen("libdfrestore.so", RTLD_NOW | RTLD_GLOBAL);
     }
-    if (!s->lib)
+    if (!s->lib) {
+        MP_ERR(f, "[dfrestore] dlopen failed again: %s\n", dlerror());
         return false;
+    }
+    MP_INFO(f, "[dfrestore] dlopen ok, resolving symbols...\n");
     s->df_init = (dfrestore_init_fn)(uintptr_t)dlsym(s->lib, "dfrestore_init");
     s->df_process = (dfrestore_process_fn)(uintptr_t)dlsym(s->lib, "dfrestore_process");
+    s->df_hop_size = (dfrestore_hop_fn)(uintptr_t)dlsym(s->lib, "dfrestore_hop_size");
     s->df_reset = (dfrestore_reset_fn)(uintptr_t)dlsym(s->lib, "dfrestore_reset");
     s->df_free = (dfrestore_free_fn)(uintptr_t)dlsym(s->lib, "dfrestore_free");
-    return s->df_init && s->df_process && s->df_reset && s->df_free;
+    bool ok = s->df_init && s->df_process && s->df_reset && s->df_free;
+    MP_INFO(f, "[dfrestore] symbols %s (hop_fn=%d)\n", ok ? "ok" : "MISSING", s->df_hop_size != NULL);
+    return ok;
 }
 
 static bool reinit(struct mp_filter *f, struct mp_aframe *fmt)
@@ -87,20 +98,24 @@ static bool reinit(struct mp_filter *f, struct mp_aframe *fmt)
 
     int rate = mp_aframe_get_rate(fmt);
     int nch = mp_aframe_get_channels(fmt);
+    MP_INFO(f, "[dfrestore] reinit rate=%d ch=%d\n", rate, nch);
 
     if (rate != 48000) {
         // mp_autoconvert 已请求 48k；防御性兜底
-        MP_ERR(f, "dfrestore: expected 48kHz, got %d\n", rate);
+        MP_ERR(f, "[dfrestore] expected 48kHz, got %d\n", rate);
         return false;
     }
 
     if (s->df)
         s->df_free(s->df);
+    MP_INFO(f, "[dfrestore] calling dfrestore_init(ch=%d, atten=%.1f, beta=%.2f)...\n",
+            nch, s->opts->atten_lim, s->opts->pf_beta);
     s->df = s->df_init(nch, s->opts->atten_lim, s->opts->pf_beta);
     if (!s->df) {
-        MP_ERR(f, "dfrestore: init failed (channels=%d)\n", nch);
+        MP_ERR(f, "[dfrestore] init failed (channels=%d)\n", nch);
         return false;
     }
+    MP_INFO(f, "[dfrestore] init ok, hop=%zu\n", s->df_hop_size(s->df));
 
     mp_aframe_reset(s->cur_format);
     mp_aframe_config_copy(s->cur_format, fmt);
@@ -213,7 +228,7 @@ static struct mp_filter *af_dfrestore_create(struct mp_filter *parent,
     s->cur_format = talloc_steal(s, mp_aframe_create());
     s->out_pool = mp_aframe_pool_create(s);
 
-    if (!load_lib(s)) {
+    if (!load_lib(s, f)) {
         MP_ERR(f, "dfrestore: cannot load libdfrestore.so\n");
         unload(s);
         talloc_free(f);

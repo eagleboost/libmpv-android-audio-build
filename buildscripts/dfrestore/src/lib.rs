@@ -20,8 +20,32 @@ use df::tract::{DfParams, DfTract, ReduceMask, RuntimeParams};
 use ndarray::{ArrayView2, ArrayViewMut2};
 use std::collections::VecDeque;
 use std::ffi::c_float;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 const MAX_CHANNELS: usize = 8;
+
+// ---- 日志：Android → logcat（tag "dfrestore"），其它平台 → stderr ----
+#[cfg(target_os = "android")]
+#[link(name = "log")]
+extern "C" {
+    fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+}
+
+#[cfg(target_os = "android")]
+fn dflog(msg: &str) {
+    use std::ffi::CString;
+    let tag = CString::new("dfrestore").unwrap();
+    let fmt = CString::new("%s").unwrap();
+    let cmsg = CString::new(msg.replace('\0', " ")).unwrap();
+    unsafe {
+        __android_log_print(4 /* INFO */, tag.as_ptr(), fmt.as_ptr(), cmsg.as_ptr());
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn dflog(msg: &str) {
+    eprintln!("[dfrestore] {msg}");
+}
 
 pub struct DfRestore {
     states: Vec<DfTract>,
@@ -36,21 +60,43 @@ pub struct DfRestore {
 
 impl DfRestore {
     fn new(channels: usize, atten_lim_db: f32, pf_beta: f32) -> Result<Self, String> {
+        dflog(&format!("init: ch={channels} atten={atten_lim_db} beta={pf_beta}"));
         let mut states = Vec::with_capacity(channels);
-        for _ in 0..channels {
-            // 与 Python torch 推理对齐：不做 lsnr 跳级（零掩码会过度压制
-            // 弱语音段，实测比 Python 输出多压 ~2.4dB），每声道独立 mask。
+        for ch in 0..channels {
             let r_params = RuntimeParams::default_with_ch(1)
                 .with_thresholds(-100.0, 100.0, 100.0)
                 .with_mask_reduce(ReduceMask::NONE)
                 .with_atten_lim(atten_lim_db)
                 .with_post_filter(pf_beta);
-            let df_params = DfParams::default();
-            let m = DfTract::new(df_params, &r_params)
-                .map_err(|e| format!("init runtime: {e:?}"))?;
+            dflog(&format!("init: loading default model (ch {ch})..."));
+            let df_params = match catch_unwind(AssertUnwindSafe(DfParams::default)) {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = format!("DfParams::default panicked: {e:?}");
+                    dflog(&msg);
+                    return Err(msg);
+                }
+            };
+            dflog(&format!("init: model loaded, creating DfTract (ch {ch})..."));
+            let m = match catch_unwind(AssertUnwindSafe(|| {
+                DfTract::new(df_params, &r_params)
+            })) {
+                Ok(Ok(m)) => m,
+                Ok(Err(e)) => {
+                    let msg = format!("init runtime: {e:?}");
+                    dflog(&msg);
+                    return Err(msg);
+                }
+                Err(e) => {
+                    let msg = format!("DfTract::new panicked: {e:?}");
+                    dflog(&msg);
+                    return Err(msg);
+                }
+            };
             states.push(m);
         }
         let hop = states[0].hop_size;
+        dflog(&format!("init: ok, hop={hop}"));
         Ok(DfRestore {
             states,
             channels,
@@ -118,7 +164,11 @@ pub unsafe extern "C" fn dfrestore_process(
                 let mut output = vec![0.0f32; hop];
                 let inp = ArrayView2::from_shape((1, hop), &input).unwrap();
                 let mut out = ArrayViewMut2::from_shape((1, hop), &mut output).unwrap();
-                let ok = r.states[ch].process(inp, out).is_ok();
+                let res = catch_unwind(AssertUnwindSafe(|| r.states[ch].process(inp, out)));
+                let ok = matches!(res, Ok(Ok(_)));
+                if let Err(e) = &res {
+                    dflog(&format!("process panicked on ch {ch}: {e:?}"));
+                }
                 // 推理失败 → 该帧直通（input 原样入 FIFO），绝不静音
                 if ok {
                     for v in output.iter() {
