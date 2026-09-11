@@ -157,29 +157,16 @@ static void process(struct mp_filter *f)
         }
     }
 
-    int nch = mp_aframe_get_channels(s->in);
     int samples = mp_aframe_get_size(s->in);
 
     if (s->df && samples > 0) {
         uint8_t **planes = mp_aframe_get_data_rw(s->in);
         if (planes && planes[0]) {
-            // interleaved 处理（保证多声道 FIFO 时序一致）
-            float *tmp = malloc((size_t)samples * nch * sizeof(float));
-            if (tmp) {
-                for (int ch = 0; ch < nch; ch++) {
-                    float *src = (float *)planes[ch];
-                    for (int i = 0; i < samples; i++)
-                        tmp[i * nch + ch] = src[i];
-                }
-                if (s->df_process(s->df, tmp, samples) != 0)
-                    MP_WARN(f, "dfrestore: process error -> passthrough\n");
-                for (int ch = 0; ch < nch; ch++) {
-                    float *dst = (float *)planes[ch];
-                    for (int i = 0; i < samples; i++)
-                        dst[i] = tmp[i * nch + ch];
-                }
-                free(tmp);
-            }
+            // AF_FORMAT_FLOAT 是打包（interleaved）格式：planes[0] 即
+            // interleaved float 数据，直接交给 dfrestore（其原生格式）。
+            // 注意 planes[1..] 对打包格式是 NULL，绝不可逐声道取。
+            if (s->df_process(s->df, (float *)planes[0], samples) != 0)
+                MP_WARN(f, "[dfrestore] process error -> passthrough\n");
         }
     }
 
