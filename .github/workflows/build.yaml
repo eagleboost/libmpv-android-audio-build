@@ -29,9 +29,9 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
       - name: Setup cargo-ndk
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-ndk
+        run: cargo install cargo-ndk --locked
+        # 注：taiki-e 预编译版需要 GLIBC 2.39（ubuntu-22.04 只有 2.35），
+        # 故从源码安装。
       - name: Symlink SDK
         working-directory: ./buildscripts
         run: |
