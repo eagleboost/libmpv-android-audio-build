@@ -16,7 +16,7 @@ if not os.path.isdir(MPV_DIR):
     print(f"[dfrestore] ERROR: {MPV_DIR} not found")
     sys.exit(1)
 
-src = os.path.join(os.path.dirname(__file__), 'af_dfrestore.c')
+src = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dfrestore', 'af_dfrestore.c')
 dst = os.path.join(MPV_DIR, 'audio', 'filter', 'af_dfrestore.c')
 with open(src, 'r') as fh:
     content = fh.read()
