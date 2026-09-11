@@ -28,7 +28,12 @@ const MAX_CHANNELS: usize = 8;
 #[cfg(target_os = "android")]
 #[link(name = "log")]
 extern "C" {
-    fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+    fn __android_log_print(
+        prio: i32,
+        tag: *const std::ffi::c_char,
+        fmt: *const std::ffi::c_char,
+        ...
+    ) -> i32;
 }
 
 #[cfg(target_os = "android")]
@@ -163,7 +168,7 @@ pub unsafe extern "C" fn dfrestore_process(
                 let input: Vec<f32> = r.in_buf[ch].clone();
                 let mut output = vec![0.0f32; hop];
                 let inp = ArrayView2::from_shape((1, hop), &input).unwrap();
-                let mut out = ArrayViewMut2::from_shape((1, hop), &mut output).unwrap();
+                let out = ArrayViewMut2::from_shape((1, hop), &mut output).unwrap();
                 let res = catch_unwind(AssertUnwindSafe(|| r.states[ch].process(inp, out)));
                 let ok = matches!(res, Ok(Ok(_)));
                 if let Err(e) = &res {
@@ -197,7 +202,7 @@ pub unsafe extern "C" fn dfrestore_process(
 /// 更新衰减上限（dB）。运行时可调。
 #[no_mangle]
 pub unsafe extern "C" fn dfrestore_set_atten_lim(r: *mut DfRestore, lim_db: f32) {
-    if let Some(r) = (unsafe { r.as_mut() }) {
+    if let Some(r) = unsafe { r.as_mut() } {
         for st in r.states.iter_mut() {
             st.set_atten_lim(lim_db);
         }
@@ -207,7 +212,7 @@ pub unsafe extern "C" fn dfrestore_set_atten_lim(r: *mut DfRestore, lim_db: f32)
 /// 更新后置滤波 beta（0 = 关闭）。
 #[no_mangle]
 pub unsafe extern "C" fn dfrestore_set_post_filter_beta(r: *mut DfRestore, beta: f32) {
-    if let Some(r) = (unsafe { r.as_mut() }) {
+    if let Some(r) = unsafe { r.as_mut() } {
         for st in r.states.iter_mut() {
             st.set_pf_beta(beta);
         }
@@ -218,7 +223,7 @@ pub unsafe extern "C" fn dfrestore_set_post_filter_beta(r: *mut DfRestore, beta:
 /// 复用 DfTract::init()（清空滚动缓冲与内部状态），不重建模型。
 #[no_mangle]
 pub unsafe extern "C" fn dfrestore_reset(r: *mut DfRestore) {
-    if let Some(r) = (unsafe { r.as_mut() }) {
+    if let Some(r) = unsafe { r.as_mut() } {
         for st in r.states.iter_mut() {
             let _ = st.init();
         }
