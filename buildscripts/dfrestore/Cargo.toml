@@ -1,0 +1,19 @@
+[package]
+name = "dfrestore"
+version = "0.1.0"
+edition = "2021"
+description = "DeepFilterNet2 real-time restore wrapper (C ABI) for VoyTrace mpv audio filter"
+license = "MIT/Apache-2.0"
+
+[lib]
+name = "dfrestore"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", tag = "v0.5.6", default-features = false, features = ["capi"] }
+ndarray = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

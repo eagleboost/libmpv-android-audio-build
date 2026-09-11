@@ -10,3 +10,15 @@ obj
 build
 local.properties
 *~
+# Rust / DSP 实验产物
+buildscripts/dfrestore/target/
+buildscripts/dfrestore/android_libs/
+buildscripts/dfrestore/dfrestore.dll
+buildscripts/dfrestore/dfrestore_cli.exe
+buildscripts/dfrestore/*.wav
+buildscripts/deartifact/*.exe
+buildscripts/deartifact/*.wav
+buildscripts/deartifact/rms_*.txt
+buildscripts/deartifact/dfn_out/
+buildscripts/deartifact/test_music*
+buildscripts/dfrestore_jni/
