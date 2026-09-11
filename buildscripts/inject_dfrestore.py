@@ -42,27 +42,32 @@ if 'af_dfrestore' not in content:
         fh.write(content)
     print("[dfrestore] Added to wscript_build.py")
 
-# 3. filters/user_filters.c 注册
-uw = os.path.join(MPV_DIR, 'filters', 'user_filters.c')
-with open(uw, 'r') as fh:
-    content = fh.read()
-if 'af_dfrestore' not in content:
-    # extern 声明：挂在 scaletempo 的 extern 之后
-    m = re.search(r'extern const struct mp_user_filter_entry af_scaletempo;', content)
+# 3. 注册：extern 在 filters/user_filters.h，数组在 filters/user_filters.c 的 af_list[]
+uh = os.path.join(MPV_DIR, 'filters', 'user_filters.h')
+with open(uh, 'r') as fh:
+    hcontent = fh.read()
+if 'af_dfrestore' not in hcontent:
+    m = re.search(r'extern const struct mp_user_filter_entry af_scaletempo2;', hcontent)
     if not m:
-        # 兜底：任意 af_* extern
-        m = re.search(r'extern const struct mp_user_filter_entry af_[a-z0-9_]+;', content)
+        m = re.search(r'extern const struct mp_user_filter_entry af_[a-z0-9_]+;', hcontent)
     if not m:
-        print("[dfrestore] ERROR: no af extern found in user_filters.c")
+        print("[dfrestore] ERROR: no af extern found in user_filters.h")
         sys.exit(1)
     anchor = m.group(0)
-    content = content.replace(
+    hcontent = hcontent.replace(
         anchor,
         anchor + '\nextern const struct mp_user_filter_entry af_dfrestore;',
         1,
     )
-    # 数组条目：挂在 &af_scaletempo 之后
-    m2 = re.search(r'&af_scaletempo,', content)
+    with open(uh, 'w') as fh:
+        fh.write(hcontent)
+    print("[dfrestore] Added extern to filters/user_filters.h")
+
+uw = os.path.join(MPV_DIR, 'filters', 'user_filters.c')
+with open(uw, 'r') as fh:
+    content = fh.read()
+if 'af_dfrestore' not in content:
+    m2 = re.search(r'&af_scaletempo2,', content)
     if not m2:
         m2 = re.search(r'&af_[a-z0-9_]+,', content)
     if not m2:
@@ -72,6 +77,6 @@ if 'af_dfrestore' not in content:
     content = content.replace(a2, a2 + '\n    &af_dfrestore,', 1)
     with open(uw, 'w') as fh:
         fh.write(content)
-    print("[dfrestore] Registered in filters/user_filters.c")
+    print("[dfrestore] Registered in af_list (user_filters.c)")
 
 print("[dfrestore] done")
