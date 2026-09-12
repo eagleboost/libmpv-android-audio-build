@@ -1,0 +1,13 @@
+# Android 16KB-page 设备兼容：与 fork 的 libmpv LDFLAGS 对齐。
+# 4KB 对齐的 .so 在 16KB page mode 的设备上 dlopen 会直接失败。
+[target.aarch64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.armv7-linux-androideabi]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.i686-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+[target.x86_64-linux-android]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

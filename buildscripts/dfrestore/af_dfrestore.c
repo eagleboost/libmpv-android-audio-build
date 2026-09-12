@@ -191,7 +191,9 @@ static void destroy(struct mp_filter *f)
     struct priv *s = f->priv;
     unload(s);
     TA_FREEP(&s->in);
-    mp_filter_free_children(f);
+    // 注：不要在这里调 mp_filter_free_children —— filter_destructor 会
+    // 在 destroy 之后自己调用它，重复释放会导致 filter graph 状态损坏
+    // （上游 af_rubberband/scaletempo 同样只在 destroy 清理自有资源）。
 }
 
 static const struct mp_filter_info af_dfrestore_filter = {
@@ -220,9 +222,10 @@ static struct mp_filter *af_dfrestore_create(struct mp_filter *parent,
     s->out_pool = mp_aframe_pool_create(s);
 
     if (!load_lib(s, f)) {
-        MP_ERR(f, "dfrestore: cannot load libdfrestore.so\n");
-        unload(s);
-        talloc_free(f);
+        // 上游范式（af_rubberband）：create 失败直接返回 NULL，不手动
+        // talloc_free(f)——filter_destructor 会正确清理，手动提前释放
+        // 会与析构路径冲突。dlopen 失败时无资源需要 unload。
+        MP_ERR(f, "[dfrestore] cannot load libdfrestore.so, filter disabled\n");
         return NULL;
     }
 
