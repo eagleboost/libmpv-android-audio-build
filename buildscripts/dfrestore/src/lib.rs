@@ -154,7 +154,11 @@ impl Worker {
 }
 
 pub struct DfRestore {
-    cmd_tx: Sender<Command>,
+    cmd_tx: Option<Sender<Command>>,
+    /// 工作线程句柄。Drop 时必须 join：dfrestore_free 返回后 C 层会立即
+    /// dlclose 卸载本库，若线程仍在库内执行（推理尾部 / 线程退出蹦床）
+    /// 会 Instruction Abort（实测反复开关 Restore 后崩溃）。
+    worker: std::thread::JoinHandle<()>,
     hop: usize,
     channels: usize,
     /// 每声道输入累积缓冲（凑满 hop 触发推理）
@@ -162,6 +166,20 @@ pub struct DfRestore {
     in_fill: Vec<usize>,
     /// 输出 FIFO（per 声道）
     out_fifo: Vec<VecDeque<f32>>,
+}
+
+impl Drop for DfRestore {
+    fn drop(&mut self) {
+        // 先关闭命令通道：worker 的 recv() 返回 Err → 退出循环。
+        self.cmd_tx.take();
+        // 等待线程真正退出（最多一跳推理的耗时，毫秒级），此后 C 层的
+        // dlclose 才安全。
+        let worker = std::mem::replace(
+            &mut self.worker,
+            std::thread::spawn(|| {}), // 占位句柄（Drop 需要字段有效）
+        );
+        let _ = worker.join();
+    }
 }
 
 impl DfRestore {
@@ -172,7 +190,7 @@ impl DfRestore {
 
         // 全部重活跑在 32MB 大栈线程上（Android mpv 音频线程栈小，
         // tract 模型编译会爆栈）。
-        let _worker = std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("dfrestore-worker".into())
             .stack_size(WORKER_STACK)
             .spawn(move || {
@@ -204,7 +222,8 @@ impl DfRestore {
             .map_err(|e| format!("init: {e}"))?;
 
         Ok(DfRestore {
-            cmd_tx,
+            cmd_tx: Some(cmd_tx),
+            worker,
             hop,
             channels,
             in_buf: vec![vec![0.0; hop]; channels],
@@ -218,7 +237,10 @@ impl DfRestore {
             .map(|ch| self.in_buf[ch].clone())
             .collect();
         let (tx, rx) = channel();
-        if self.cmd_tx.send(Command::Process(inputs, tx)).is_err() {
+        let Some(cmd_tx) = &self.cmd_tx else {
+            return false;
+        };
+        if cmd_tx.send(Command::Process(inputs, tx)).is_err() {
             return false;
         }
         let Ok(outs) = rx.recv() else {
@@ -319,7 +341,9 @@ pub unsafe extern "C" fn dfrestore_set_post_filter_beta(r: *mut DfRestore, _beta
 #[no_mangle]
 pub unsafe extern "C" fn dfrestore_reset(r: *mut DfRestore) {
     if let Some(r) = unsafe { r.as_mut() } {
-        let _ = r.cmd_tx.send(Command::Reset);
+        if let Some(cmd_tx) = &r.cmd_tx {
+            let _ = cmd_tx.send(Command::Reset);
+        }
         for ch in 0..r.channels {
             r.in_fill[ch] = 0;
             r.out_fifo[ch].clear();
