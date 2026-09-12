@@ -130,8 +130,12 @@ static void process(struct mp_filter *f)
         return;
 
     struct mp_frame frame = mp_pin_out_read(s->in_pin);
-    if (!frame.type)
+    if (!frame.type) {
+        // 关键：经 autoconvert 中间层读数据必须显式请求下一帧
+        // （与 scaletempo 相同），否则违反 filter graph 前置条件。
+        mp_pin_out_request_data_next(s->in_pin);
         return; // no input yet
+    }
 
     if (frame.type != MP_FRAME_AUDIO && frame.type != MP_FRAME_EOF) {
         MP_ERR(f, "unexpected frame type\n");
@@ -141,8 +145,8 @@ static void process(struct mp_filter *f)
     }
 
     if (frame.type == MP_FRAME_EOF) {
+        // 无缓冲数据：直接把 EOF 传下去（不 repeat）
         mp_pin_in_write(f->ppins[1], frame);
-        mp_pin_out_repeat_eof(s->in_pin);
         return;
     }
 
