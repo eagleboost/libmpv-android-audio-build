@@ -47,6 +47,7 @@ jobs:
           name: artifact
           path: |
             ./buildscripts/*.jar
+            ./buildscripts/debug-symbols-default.zip
             ./buildscripts/deps/media-kit-android-helper/app/build/outputs/apk/release/*.jar
       - name: Upload Release
         uses: softprops/action-gh-release@v1
