@@ -7,7 +7,7 @@ license = "MIT/Apache-2.0"
 
 [lib]
 name = "dfrestore"
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", tag = "v0.5.6", default-features = false, features = ["capi"] }

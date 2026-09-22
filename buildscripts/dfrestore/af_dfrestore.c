@@ -9,6 +9,7 @@
  */
 
 #include <float.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,9 +31,101 @@ typedef size_t (*dfrestore_hop_fn)(dfrestore_t);
 typedef void (*dfrestore_reset_fn)(dfrestore_t);
 typedef void (*dfrestore_free_fn)(dfrestore_t);
 
+/* ------------------------------------------------------------------ */
+/* Voice Clarity EQ —— DFN3 降噪后的第二级补偿（tasks/voice-clarity-eq.md）
+ *
+ * DFN3 消除 MP3 高频伪影的同时把人声高频谐波也压掉了（人声变闷）。
+ * 8 段 peaking biquad 串联：低频去浑浊 + 2-4 kHz presence boost 恢复
+ * 清晰度（人声可懂度核心频段），7.5 kHz 轻衰减防伪影回放。
+ * 末端 soft limiter 防 EQ 提升后削波。
+ */
+
+typedef struct {
+    double b0, b1, b2, a1, a2;   // 归一化系数
+    double x1, x2, y1, y2;       // 状态（上一/上两帧输入输出）
+} biquad_t;
+
+typedef struct {
+    double fc;     // 中心频率 Hz
+    double gdb;    // 增益 dB
+    double Q;
+} eq_band_t;
+
+/* 曲线设计：重点 2-4 kHz presence，7.5 kHz 微降防伪影回放 */
+static const eq_band_t voice_clarity_eq[] = {
+    {  80.0, -2.0, 0.7 },   // 低频隆隆
+    { 150.0, -1.0, 0.8 },   // 浑浊
+    { 300.0, -2.0, 0.9 },   // 闷/箱子声
+    { 800.0, -1.0, 1.0 },   // 鼻音/厚重
+    { 2000.0, +1.5, 0.9 },  // 人声存在感
+    { 3000.0, +2.0, 1.0 },  // 主要清晰度
+    { 4500.0, +1.0, 1.0 },  // 辅音清晰度
+    { 7500.0, -0.5, 1.0 },  // 防伪影回放
+};
+#define EQ_BANDS (sizeof(voice_clarity_eq) / sizeof(voice_clarity_eq[0]))
+#define EQ_PREAMP_DB (-3.0)  // 前置增益：为 EQ 提升留 headroom
+
+/* RBJ Audio EQ Cookbook — peaking biquad 系数 */
+static void biquad_peaking(biquad_t *f, double fc, double gdb, double Q, double fs)
+{
+    double A = pow(10.0, gdb / 40.0);
+    double w0 = 2.0 * M_PI * fc / fs;
+    double cw = cos(w0), sw = sin(w0);
+    double alpha = sw / (2.0 * Q);
+    double a0 = 1.0 + alpha / A;
+    f->b0 = (1.0 + alpha * A) / a0;
+    f->b1 = (-2.0 * cw) / a0;
+    f->b2 = (1.0 - alpha * A) / a0;
+    f->a1 = (-2.0 * cw) / a0;
+    f->a2 = (1.0 - alpha / A) / a0;
+}
+
+/* 初始化 EQ 链（reinit 时按实际 fs 计算） */
+static void eq_init(biquad_t *chain, int bands, double fs, double preamp_db)
+{
+    for (int i = 0; i < bands; i++) {
+        biquad_peaking(&chain[i], voice_clarity_eq[i].fc,
+                       voice_clarity_eq[i].gdb, voice_clarity_eq[i].Q, fs);
+        chain[i].x1 = chain[i].x2 = chain[i].y1 = chain[i].y2 = 0.0;
+    }
+    // 第 0 个 band 前串一个整体 preamp（合并进 b0/b2 的 DC 增益）
+    (void)preamp_db; // preamp 在 eq_process 入口做标量乘，更清晰
+}
+
+static inline float biquad_process(biquad_t *f, double x)
+{
+    double y = f->b0 * x + f->b1 * f->x1 + f->b2 * f->x2
+             - f->a1 * f->y1 - f->a2 * f->y2;
+    f->x2 = f->x1; f->x1 = x;
+    f->y2 = f->y1; f->y1 = y;
+    return (float)y;
+}
+
+/* EQ 链处理 interleaved float（所有声道共用同一条 EQ——语音内容相同） */
+static void eq_process(biquad_t *chain, int bands, float *buf, int total_samples,
+                       double preamp_linear)
+{
+    for (int i = 0; i < total_samples; i++) {
+        double x = buf[i] * preamp_linear;
+        for (int b = 0; b < bands; b++)
+            x = biquad_process(&chain[b], x);
+        buf[i] = (float)x;
+    }
+}
+
+/* Soft limiter：|x| > 0.9 后 tanh 软限幅，防削波且几乎无失真 */
+static inline float soft_limit(float x)
+{
+    if (x > 0.9f)  return 0.9f + tanhf((x - 0.9f) * 5.0f) * 0.1f;
+    if (x < -0.9f) return -0.9f + tanhf((x + 0.9f) * 5.0f) * 0.1f;
+    return x;
+}
+/* ------------------------------------------------------------------ */
+
 struct f_opts {
     float atten_lim;
     float pf_beta;
+    int eq_enabled;   // 1 = DFN3 后串 Voice Clarity EQ
 };
 
 struct priv {
@@ -50,6 +143,10 @@ struct priv {
     dfrestore_hop_fn df_hop_size;
     dfrestore_reset_fn df_reset;
     dfrestore_free_fn df_free;
+
+    /* Voice Clarity EQ */
+    biquad_t eq_chain[EQ_BANDS];
+    double eq_preamp;
 };
 
 static void unload(struct priv *s)
@@ -119,6 +216,14 @@ static bool reinit(struct mp_filter *f, struct mp_aframe *fmt)
 
     mp_aframe_reset(s->cur_format);
     mp_aframe_config_copy(s->cur_format, fmt);
+
+    // Voice Clarity EQ：按实际采样率初始化 biquad 系数
+    if (s->opts->eq_enabled) {
+        eq_init(s->eq_chain, EQ_BANDS, (double)rate, EQ_PREAMP_DB);
+        s->eq_preamp = pow(10.0, EQ_PREAMP_DB / 20.0);
+        MP_INFO(f, "[dfrestore] voice clarity EQ on (%d bands, preamp %.1f dB)\n",
+                 (int)EQ_BANDS, EQ_PREAMP_DB);
+    }
     return true;
 }
 
@@ -171,6 +276,16 @@ static void process(struct mp_filter *f)
             // 注意 planes[1..] 对打包格式是 NULL，绝不可逐声道取。
             if (s->df_process(s->df, (float *)planes[0], samples) != 0)
                 MP_WARN(f, "[dfrestore] process error -> passthrough\n");
+
+            // 第二级：Voice Clarity EQ + soft limiter（DFN3 降噪后）
+            if (s->opts->eq_enabled) {
+                int nch = mp_aframe_get_channels(s->in);
+                int total = samples * nch;
+                float *buf = (float *)planes[0];
+                eq_process(s->eq_chain, EQ_BANDS, buf, total, s->eq_preamp);
+                for (int i = 0; i < total; i++)
+                    buf[i] = soft_limit(buf[i]);
+            }
         }
     }
 
@@ -254,10 +369,13 @@ const struct mp_user_filter_entry af_dfrestore = {
         .priv_defaults = &(const OPT_BASE_STRUCT) {
             .atten_lim = 12.0,
             .pf_beta = 0.05,
+            .eq_enabled = 1,   // Voice Clarity EQ 默认开（DFN3 后人声清晰度补偿）
         },
         .options = (const struct m_option[]) {
             {"atten_lim", OPT_FLOAT(atten_lim), M_RANGE(0, 100)},
             {"pf_beta", OPT_FLOAT(pf_beta), M_RANGE(0, 1)},
+            {"eq", OPT_CHOICE(eq_enabled,
+                {"off", 0}, {"on", 1}, {"no", 0}, {"yes", 1})},
             {0}
         },
     },
