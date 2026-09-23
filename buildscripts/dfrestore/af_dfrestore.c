@@ -101,14 +101,20 @@ static inline float biquad_process(biquad_t *f, double x)
     return (float)y;
 }
 
-/* EQ 链处理 interleaved float（所有声道共用同一条 EQ——语音内容相同） */
-static void eq_process(biquad_t *chain, int bands, float *buf, int total_samples,
-                       double preamp_linear)
+/* EQ 链处理 interleaved float — 每声道独立 biquad 链
+ *（共用状态会让 L,R,L,R 交替通过同一滤波器 → 声道间串扰 +
+ *  滤波器状态异常 → 可能产生溢出值） */
+static void eq_process(biquad_t chains[][EQ_BANDS], int bands, int nch,
+                       float *buf, int total_samples, double preamp_linear)
 {
     for (int i = 0; i < total_samples; i++) {
+        int ch = i % nch; // 该样本属于哪个声道
+        biquad_t *chain = chains[ch];
         double x = buf[i] * preamp_linear;
         for (int b = 0; b < bands; b++)
             x = biquad_process(&chain[b], x);
+        // NaN/Inf 防护（理论上不会发生，防御式编程）
+        if (!(x > -100.0 && x < 100.0)) x = 0.0;
         buf[i] = (float)x;
     }
 }
@@ -144,8 +150,10 @@ struct priv {
     dfrestore_reset_fn df_reset;
     dfrestore_free_fn df_free;
 
-    /* Voice Clarity EQ */
-    biquad_t eq_chain[EQ_BANDS];
+    /* Voice Clarity EQ — 每声道独立 biquad 链（L/R 状态不互相污染） */
+#define EQ_MAX_CH 2
+    biquad_t eq_chain[EQ_MAX_CH][EQ_BANDS];
+    int eq_nch;
     double eq_preamp;
 };
 
@@ -154,9 +162,12 @@ static void unload(struct priv *s)
     if (s->df && s->df_free)
         s->df_free(s->df);
     s->df = NULL;
-    if (s->lib)
-        dlclose(s->lib);
-    s->lib = NULL;
+    // 不 dlclose：Rust/tract 注册的 TLS 析构器（pthread_key destructor）
+    // 在 mpv core 等线程退出时仍会被 pthread_key_clean_all 调用——
+    // dlclose 解除代码映射后指向 non-executable 内存 → SIGSEGV
+    //（stack: pthread_exit → pthread_key_clean_all → unmapped code）。
+    // 库 ~15MB，保驻代价可接受；下次 create 的 dlopen 引用计数+1 复用。
+    s->lib = NULL; // 只清引用，不 dlclose
     s->df_init = NULL;
     s->df_process = NULL;
     s->df_hop_size = NULL;
@@ -217,12 +228,15 @@ static bool reinit(struct mp_filter *f, struct mp_aframe *fmt)
     mp_aframe_reset(s->cur_format);
     mp_aframe_config_copy(s->cur_format, fmt);
 
-    // Voice Clarity EQ：按实际采样率初始化 biquad 系数
+    // Voice Clarity EQ：按实际采样率初始化 biquad 系数（每声道一条链）
     if (s->opts->eq_enabled) {
-        eq_init(s->eq_chain, EQ_BANDS, (double)rate, EQ_PREAMP_DB);
+        int ch = nch > EQ_MAX_CH ? EQ_MAX_CH : nch;
+        s->eq_nch = ch;
+        for (int c = 0; c < ch; c++)
+            eq_init(s->eq_chain[c], EQ_BANDS, (double)rate, EQ_PREAMP_DB);
         s->eq_preamp = pow(10.0, EQ_PREAMP_DB / 20.0);
-        MP_INFO(f, "[dfrestore] voice clarity EQ on (%d bands, preamp %.1f dB)\n",
-                 (int)EQ_BANDS, EQ_PREAMP_DB);
+        MP_INFO(f, "[dfrestore] voice clarity EQ on (%d bands × %d ch, preamp %.1f dB)\n",
+                 (int)EQ_BANDS, ch, EQ_PREAMP_DB);
     }
     return true;
 }
@@ -280,9 +294,10 @@ static void process(struct mp_filter *f)
             // 第二级：Voice Clarity EQ + soft limiter（DFN3 降噪后）
             if (s->opts->eq_enabled) {
                 int nch = mp_aframe_get_channels(s->in);
+                if (nch > EQ_MAX_CH) nch = EQ_MAX_CH; // 防 monac>2 溢出
                 int total = samples * nch;
                 float *buf = (float *)planes[0];
-                eq_process(s->eq_chain, EQ_BANDS, buf, total, s->eq_preamp);
+                eq_process(s->eq_chain, EQ_BANDS, nch, buf, total, s->eq_preamp);
                 for (int i = 0; i < total; i++)
                     buf[i] = soft_limit(buf[i]);
             }
