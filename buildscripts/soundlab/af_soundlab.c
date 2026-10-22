@@ -57,7 +57,7 @@ static void biquad_peaking(biquad_t *f, double fc, double gdb, double width_oct,
     f->b1 = (-2.0 * cos(w0)) / a0;
     f->b2 = (1.0 - alpha * A) / a0;
     f->a1 = (-2.0 * cos(w0)) / a0;
-    f->a2 = (1.0 + alpha / A) / a0;
+    f->a2 = (1.0 - alpha / A) / a0;   // ← 符号修复：RBJ 是 1−alpha/A（写成 + 会不稳定→杂音）
     f->z1 = f->z2 = 0.0;
 }
 
