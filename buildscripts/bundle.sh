@@ -29,6 +29,10 @@ for abi in arm64-v8a armeabi-v7a x86 x86_64; do
 done
 # --- End dfrestore ---
 
+# --- Inject af_soundlab (Sound Lab 参数均衡器，纯 C) ---
+python3 inject_soundlab.py
+# --- End soundlab ---
+
 ./build.sh
 
 zip -r debug-symbols-default.zip prefix/*/lib
