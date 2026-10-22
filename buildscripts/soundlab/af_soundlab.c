@@ -73,7 +73,8 @@ static inline double biquad_process(biquad_t *f, double x)
 /* ------------------------------------------------------------------ */
 
 struct sl_opts {
-    char *bands;   // "fc/w/g;fc/w/g;..."（App 侧已 cut-only）
+    char *bands;   // "fc/w/g;fc/w/g;..."（App 侧下发，可含正增益）
+    float gain;    // 全局前置增益 dB（preamp，通常为负——为 boost 留 headroom）
 };
 
 struct band {
@@ -90,6 +91,7 @@ struct priv {
     int nbands;
     biquad_t chain[SL_MAX_CH][SL_MAX_BANDS];
     int nch;
+    double preamp_linear;  // 10^(gain/20)，process 入口标量乘
 };
 
 /* 解析 "fc/w/g;fc/w/g" → bands[]。返回段数，非法返回 -1。 */
@@ -139,6 +141,7 @@ static bool reinit(struct mp_filter *f, struct mp_aframe *fmt)
         return false;
     }
     s->nch = nch > SL_MAX_CH ? SL_MAX_CH : nch;
+    s->preamp_linear = pow(10.0, s->opts->gain / 20.0);
     for (int c = 0; c < s->nch; c++)
         for (int b = 0; b < s->nbands; b++)
             biquad_peaking(&s->chain[c][b], s->bands[b].fc, s->bands[b].gdb,
@@ -190,11 +193,14 @@ static void process(struct mp_filter *f)
         if (planes && planes[0]) {
             // AF_FORMAT_FLOAT 打包格式：interleaved float
             float *buf = (float *)planes[0];
+            const double preamp = s->preamp_linear;
             for (int i = 0; i < samples; i++)
                 for (int c = 0; c < s->nch; c++) {
-                    double x = buf[i * s->nch + c];
+                    double x = buf[i * s->nch + c] * preamp;
                     for (int b = 0; b < s->nbands; b++)
                         x = biquad_process(&s->chain[c][b], x);
+                    // NaN/Inf 防护
+                    if (!(x > -100.0 && x < 100.0)) x = 0.0;
                     buf[i * s->nch + c] = (float)x;
                 }
         }
@@ -270,6 +276,8 @@ const struct mp_user_filter_entry af_soundlab = {
         .options = (const struct m_option[]) {
             {"b", OPT_STRING(bands)},
             {"bands", OPT_STRING(bands)},
+            {"g", OPT_FLOAT(gain), M_RANGE(-24, 0)},
+            {"gain", OPT_FLOAT(gain), M_RANGE(-24, 0)},
             {0}
         },
     },
