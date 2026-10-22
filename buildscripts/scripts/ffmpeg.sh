@@ -159,6 +159,8 @@ cpuflags=
 	\
 	--enable-filter=overlay \
 	--enable-filter=equalizer \
+	--enable-filter=aresample \
+	--enable-filter=firequalizer \
 	\
 	--enable-protocol=async \
 	--enable-protocol=cache \
